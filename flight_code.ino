@@ -67,7 +67,8 @@ const float PID_ACTIVATE_ALT = 50.0f;   // altitude to start roll control (m)
 const double PID_KP = 10.0;
 const double PID_KI = 5.0;
 const double PID_KD = 3.0;
-const double PID_DT = 0.005;            // controller timestep (s)
+const int operating_feq = 200;          // main loop frequency (Hz)
+const double PID_DT = 1.0 / operating_feq; // controller timestep (s)
 const double PID_PWM_FREQ = 20.0;       // PWM carrier frequency (Hz)
 const int ACTUATOR_LEFT_PIN  = 9;
 const int ACTUATOR_RIGHT_PIN = 10;
@@ -283,9 +284,9 @@ void loop() {
     analogWrite(LED_PIN, ledState ? 255 : 0);
   }
   
-  // 200 Hz loop cycle for sensor processing and logging
+  // loop cycle for sensor processing and logging at operating_feq
   static unsigned long loopStartTime = micros();
-  const unsigned long loopInterval = 5000; // 200 Hz
+  const unsigned long loopInterval = 1000000UL / operating_feq;
   unsigned long currentTime = micros();
   
   // New static flag: once we dump the rolling buffer, we stop using it.
@@ -294,7 +295,7 @@ void loop() {
 
   if (currentTime - loopStartTime >= loopInterval) {
     loopStartTime = currentTime;
-    float dt = 0.005f; // 5ms per loop
+    float dt = PID_DT; // derived from operating_feq
     
     // Read sensor data and update EKF/orientation
     float ax, ay, az, gx, gy, gz, mx, my, mz;
@@ -441,13 +442,13 @@ void loop() {
         analogWrite(LED_PIN, ledState ? 255 : 0);
       }
       
-      // 1kHz sensor processing loop in descent
+      // sensor processing loop in descent at operating_feq
       static unsigned long loopStartTime = micros();
-      const unsigned long loopInterval = 1000;  // 1 ms interval
+      const unsigned long loopInterval = 1000000UL / operating_feq;
       unsigned long currentTime = micros();
       if (currentTime - loopStartTime >= loopInterval) {
         loopStartTime = currentTime;
-        float dt = 0.001f;
+        float dt = PID_DT;
         
         // Get sensor data and update EKF as before
         float ax, ay, az, gx, gy, gz, mx, my, mz;
