@@ -481,6 +481,11 @@ void loop() {
         }
         
         // Landing detection: if altitude (y) and relative altitude (relAlt) change by less than LANDING_ALT_CHANGE_THRESHOLD for LANDING_TIME_THRESHOLD ms.
+
+        // Landing detection: if altitude (y) and relative altitude (relAlt) change by less than
+        // LANDING_ALT_CHANGE_THRESHOLD for LANDING_TIME_THRESHOLD ms. Use global variables so the
+        // state persists outside this loop.
+
         if (landingTimerStart == 0) {
           landingTimerStart = millis();
           prevAltitude = y;
