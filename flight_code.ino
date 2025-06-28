@@ -7,6 +7,7 @@
 #include <Adafruit_BMP3XX.h>
 #include <ArduinoEigen.h>
 #include <math.h>
+#include <algorithm>
 
 // =================== Project Declarations ===================
 
@@ -58,7 +59,100 @@ void logSensorData();
 void flushAllBuffers();
 void Summarylog(const String &msg);
 
-// =================== New Global Constants ===================
+// ==== User-configurable parameters ====
+const int LED_PIN = 13;
+
+// PID roll control
+const float PID_ACTIVATE_ALT = 50.0f;   // altitude to start roll control (m)
+const double PID_KP = 10.0;
+const double PID_KI = 5.0;
+const double PID_KD = 3.0;
+const double PID_DT = 0.005;            // controller timestep (s)
+const double PID_PWM_FREQ = 20.0;       // PWM carrier frequency (Hz)
+const int ACTUATOR_LEFT_PIN  = 9;
+const int ACTUATOR_RIGHT_PIN = 10;
+
+// Timing and threshold constants
+const unsigned long INIT_DURATION              = 2000;  // ms in INIT state
+const unsigned long CALIBRATION_DURATION       = 100;   // ms after sensor setup
+const unsigned long ASCENT_BUFFER_DURATION     = 5000;  // ms of ascent buffer
+const int  ASCENT_BUFFER_SIZE                  = 5000;  // samples at 1 kHz
+const float ASCENT_ACCEL_THRESHOLD             = 6.0f;  // m/s² acceleration
+const unsigned long ASCENT_ACCEL_TIME_THRESHOLD = 600;  // ms high accel
+
+// Apogee detection
+const float AP_VY_ASCENT_THRESHOLD  = 20.0f;  // m/s minimal ascent velocity
+const unsigned long AP_MIN_ASCENT_TIME = 1000; // ms of sustained ascent
+const float AP_VY_FALL_THRESHOLD   = -5.0f;  // m/s falling velocity
+const float AP_MIN_ALTITUDE        = 10.0f;  // m minimum altitude before apogee
+
+// Post-apogee logging
+const unsigned long POST_APOGEE_LOG_DURATION = 5000;  // ms
+const unsigned long LOW_RATE_LOG_INTERVAL    = 100;   // ms interval for 10Hz
+const float DESCENT_VY_FAST_THRESHOLD       = 20.0f;  // m/s fast descent
+
+// Landing detection
+const float LANDING_ALT_CHANGE_THRESHOLD    = 1.0f;   // m of altitude change
+const unsigned long LANDING_TIME_THRESHOLD  = 5000;   // ms of minimal change
+
+// === Roll control PID components ===
+template<typename T>
+inline T clampVal(T v, T lo, T hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
+
+inline double computeAngleError(double desiredAngle, double actualAngle) {
+  return desiredAngle - actualAngle;
+}
+
+inline double computeVelocityError(double angularVelocity) {
+  return -angularVelocity;
+}
+
+class PIDController {
+public:
+  PIDController(double Kp, double Ki, double Kd, double dt)
+    : Kp(Kp), Ki(Ki), Kd(Kd), dt(dt), integral(0.0) {}
+
+  double update(double angleError, double velError) {
+    integral += angleError * dt;
+    double P = Kp * angleError;
+    double I = Ki * integral;
+    double D = Kd * velError;
+    return P + I + D;
+  }
+
+  void reset() { integral = 0.0; }
+
+private:
+  double Kp, Ki, Kd, dt;
+  double integral;
+};
+
+class PWMGenerator {
+public:
+  PWMGenerator(double pwmFrequency, double dt)
+    : freq(pwmFrequency), dt(dt), timeInCycle(0.0) {}
+
+  int update(double controlSignal) {
+    double period = 1.0 / freq;
+    timeInCycle += dt;
+    if (timeInCycle >= period) timeInCycle -= period;
+    double phase = timeInCycle / period;
+    double duty = clampVal(controlSignal, -1.0, 1.0);
+    if (duty > 0) return (phase < duty) ? +1 : 0;
+    else if (duty < 0) return (phase < -duty) ? -1 : 0;
+    else return 0;
+  }
+
+private:
+  double freq, dt, timeInCycle;
+};
+
+PIDController rollPid(PID_KP, PID_KI, PID_KD, PID_DT);
+PWMGenerator rollPwm(PID_PWM_FREQ, PID_DT);
 
 // Flight state definitions:
 enum SystemState {
@@ -86,30 +180,6 @@ File systemLogFile;     // Will store system log messages
 
 SystemState systemState = INIT;
 unsigned long stateStartTime = 0;
-const int LED_PIN = 13;
-
-// Timing and threshold constants:
-const unsigned long INIT_DURATION              = 2000;  // ms in INIT state
-const unsigned long CALIBRATION_DURATION       = 100;   // ms after sensor setup
-const unsigned long ASCENT_BUFFER_DURATION     = 5000;  // ms (5 sec of 1kHz data)
-const int ASCENT_BUFFER_SIZE                    = 5000;  // samples at 1kHz for 5 sec
-const float ASCENT_ACCEL_THRESHOLD              = 6.0;   // m/s² (Y-axis acceleration trigger)
-const unsigned long ASCENT_ACCEL_TIME_THRESHOLD  = 600;   // ms threshold for high accel - k2050 0.7 second burn 
-
-// Apogee detection parameters:
-const float AP_VY_ASCENT_THRESHOLD              = 20.0;   // m/s minimal ascent velocity
-const unsigned long AP_MIN_ASCENT_TIME           = 1000;  // ms of sustained ascent needed
-const float AP_VY_FALL_THRESHOLD                 = -5.0;  // m/s falling velocity threshold
-const float AP_MIN_ALTITUDE                      = 10.0;  // m minimum altitude before apogee
-
-// Post-apogee logging parameters:
-const unsigned long POST_APOGEE_LOG_DURATION     = 5000;  // ms to switch logging rate post-apogee
-const unsigned long LOW_RATE_LOG_INTERVAL        = 100;   // ms interval for 10Hz logging
-const float DESCENT_VY_FAST_THRESHOLD            = 20.0;  // m/s fast descent: switch to 1kHz logging
-
-// Landing detection parameters:
-const float LANDING_ALT_CHANGE_THRESHOLD         = 1.0;   // m (minimum change considered motion)
-const unsigned long LANDING_TIME_THRESHOLD       = 5000;  // ms (5 seconds of minimal change)
 
 // =================== Global Variables for Ascent Rolling Buffer ===================
 struct LogEntry {
@@ -142,6 +212,8 @@ unsigned long landingTimerStart = 0;
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
+  pinMode(ACTUATOR_LEFT_PIN, OUTPUT);
+  pinMode(ACTUATOR_RIGHT_PIN, OUTPUT);
   stateStartTime = millis();
 }
 
@@ -235,6 +307,28 @@ void loop() {
     updateIntegratedAngles(gx, gy, gz, dt);
     float Roll, Pitch, Yaw;
     getIntegratedAngles(Roll, Pitch, Yaw);
+
+    // Altitude-triggered roll control
+    if (y > PID_ACTIVATE_ALT) {
+      double angleErr = computeAngleError(0.0, integratedRoll / RAD_TO_DEG);
+      double velErr   = computeVelocityError(gy);
+      double control  = rollPid.update(angleErr, velErr);
+      int pwmOut      = rollPwm.update(control);
+      if (pwmOut > 0) {
+        digitalWrite(ACTUATOR_RIGHT_PIN, HIGH);
+        digitalWrite(ACTUATOR_LEFT_PIN, LOW);
+      } else if (pwmOut < 0) {
+        digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
+        digitalWrite(ACTUATOR_LEFT_PIN, HIGH);
+      } else {
+        digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
+        digitalWrite(ACTUATOR_LEFT_PIN, LOW);
+      }
+    } else {
+      rollPid.reset();
+      digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
+      digitalWrite(ACTUATOR_LEFT_PIN, LOW);
+    }
     
     // Update maximum altitude for apogee detection.
     if (y > maxAltitude) {
@@ -323,6 +417,10 @@ void loop() {
         apogeeDetected = true;
         apogeeTimestamp = millis();
         Summarylog("APOGEE DETECTED.");
+        // Disable actuators and reset controller when entering DESCENT
+        rollPid.reset();
+        digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
+        digitalWrite(ACTUATOR_LEFT_PIN, LOW);
         systemState = DESCENT;
         stateStartTime = millis();
       }
@@ -362,6 +460,11 @@ void loop() {
         updateIntegratedAngles(gx, gy, gz, dt);
         float Roll, Pitch, Yaw;
         getIntegratedAngles(Roll, Pitch, Yaw);
+
+        // No roll control during descent. Ensure actuators are off and PID reset.
+        rollPid.reset();
+        digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
+        digitalWrite(ACTUATOR_LEFT_PIN, LOW);
         
         // Decide on logging rate:
         static unsigned long lastLogTime = 0;
@@ -378,8 +481,10 @@ void loop() {
         }
         
         // Landing detection: if altitude (y) and relative altitude (relAlt) change by less than LANDING_ALT_CHANGE_THRESHOLD for LANDING_TIME_THRESHOLD ms.
-        static float prevAltitude = y;
-        static unsigned long landingTimerStart = millis();
+        if (landingTimerStart == 0) {
+          landingTimerStart = millis();
+          prevAltitude = y;
+        }
         if ((fabs(y - prevAltitude) < LANDING_ALT_CHANGE_THRESHOLD) &&
             (fabs(relAlt - prevAltitude) < LANDING_ALT_CHANGE_THRESHOLD)) {
           if (millis() - landingTimerStart >= LANDING_TIME_THRESHOLD) {
