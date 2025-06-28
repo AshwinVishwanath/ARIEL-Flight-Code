@@ -311,7 +311,7 @@ void loop() {
 
     // Altitude-triggered roll control
     if (y > PID_ACTIVATE_ALT) {
-      double angleErr = computeAngleError(0.0, integratedRoll / RAD_TO_DEG);
+      double angleErr = computeAngleError(0.0, roll / RAD_TO_DEG);
       double velErr   = computeVelocityError(gy);
       double control  = rollPid.update(angleErr, velErr);
       int pwmOut      = rollPwm.update(control);
