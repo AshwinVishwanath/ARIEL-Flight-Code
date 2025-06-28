@@ -377,9 +377,13 @@ void loop() {
           logSensorData();
         }
         
-        // Landing detection: if altitude (y) and relative altitude (relAlt) change by less than LANDING_ALT_CHANGE_THRESHOLD for LANDING_TIME_THRESHOLD ms.
-        static float prevAltitude = y;
-        static unsigned long landingTimerStart = millis();
+        // Landing detection: if altitude (y) and relative altitude (relAlt) change by less than
+        // LANDING_ALT_CHANGE_THRESHOLD for LANDING_TIME_THRESHOLD ms. Use global variables so the
+        // state persists outside this loop.
+        if (landingTimerStart == 0) {
+          landingTimerStart = millis();
+          prevAltitude = y;
+        }
         if ((fabs(y - prevAltitude) < LANDING_ALT_CHANGE_THRESHOLD) &&
             (fabs(relAlt - prevAltitude) < LANDING_ALT_CHANGE_THRESHOLD)) {
           if (millis() - landingTimerStart >= LANDING_TIME_THRESHOLD) {
