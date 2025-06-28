@@ -60,7 +60,7 @@ void flushAllBuffers();
 void Summarylog(const String &msg);
 
 // ==== User-configurable parameters ====
-const int LED_PIN = 13;
+const int LED_PIN = 4;
 
 // PID roll control
 const float PID_ACTIVATE_ALT = 50.0f;   // altitude to start roll control (m)
@@ -70,8 +70,8 @@ const double PID_KD = 3.0;
 const int operating_feq = 200;          // main loop frequency (Hz)
 const double PID_DT = 1.0 / operating_feq; // controller timestep (s)
 const double PID_PWM_FREQ = 20.0;       // PWM carrier frequency (Hz)
-const int ACTUATOR_LEFT_PIN  = 9;
-const int ACTUATOR_RIGHT_PIN = 10;
+const int ACTUATOR_LEFT_PIN  = 0;  // anticlockwise rotation, servo 1
+const int ACTUATOR_RIGHT_PIN = 2; // clockwise rotation , servo 3
 
 // Timing and threshold constants
 const unsigned long INIT_DURATION              = 2000;  // ms in INIT state
