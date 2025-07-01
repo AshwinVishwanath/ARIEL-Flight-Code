@@ -9,7 +9,6 @@
 #include <math.h>
 #include <algorithm>
 
-#define RAD_TO_DEG 57.295779513082320876f
 
 // =================== Project Declarations ===================
 
