@@ -386,9 +386,6 @@ static float iYaw   = 0.0f;
 static float fGx    = 0.0f;
 static float fGy    = 0.0f;
 static float fGz    = 0.0f;
-
-/*---------------- ORIENTATION ----------------*/
-static float iRoll=0,iPitch=0,iYaw=0,fGx=0,fGy=0,fGz=0;
 void updateIntegratedAngles(float gx,float gy,float gz,float dt){
   const float a=0.7f;
   fGx=a*gx+(1-a)*fGx; fGy=a*gy+(1-a)*fGy; fGz=a*gz+(1-a)*fGz;
@@ -424,8 +421,9 @@ static Eigen::MatrixXf P;         // The state covariance matrix
 static Eigen::MatrixXf Q;         // Process (model) noise covariance
 static Eigen::MatrixXf R;         // Measurement noise covariance
 
-//  Define and initialize Kalman gain matrix
-Eigen::MatrixXf lastKalmanGain = Eigen::MatrixXf::Zero(n_x, 1);
+// Kalman gain from the most recent update
+// (allocated in ekfInit once n_x is known)
+Eigen::MatrixXf lastKalmanGain;
 
 static bool initialized = false;
 
@@ -440,11 +438,12 @@ static bool initialized = false;
  * @param vz Initial velocity along z
  */
 void ekfInit(float x, float y, float z, float vx, float vy, float vz) {
-    // Allocate space for our vectors/matrices 
+    // Allocate space for our vectors/matrices
     x_mean = Eigen::VectorXf(n_x);
     P      = Eigen::MatrixXf(n_x, n_x);
     Q      = Eigen::MatrixXf(n_x, n_x);
     R      = Eigen::MatrixXf(n_z, n_z);
+    lastKalmanGain = Eigen::MatrixXf::Zero(n_x, 1);
 
     // Set the initial state (now y is altitude)
     x_mean << x, y, z, vx, vy, vz;
