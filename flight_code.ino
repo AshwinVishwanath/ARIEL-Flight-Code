@@ -101,7 +101,6 @@ float altitudeBias      = 0.0f;
 float baselineAltitude  = 0.0f;
 
 // EKF (state, cov, etc.) live in ekf_sensor_fusion.cpp-style section
-Eigen::MatrixXf lastKalmanGain;
 
 // System files
 File rawDataFile, filteredDataFile, systemLogFile;
