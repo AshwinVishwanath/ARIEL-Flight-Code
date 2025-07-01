@@ -115,6 +115,9 @@ volatile float ctrl_rollDeg = 0.0f;
 volatile float ctrl_gyroY   = 0.0f;
 volatile float ctrl_alt_m   = 0.0f;
 volatile float ctrl_vy      = 0.0f;
+// Mirrors of the most-recent command sent to each actuator (0 = LOW, 1 = HIGH)
+volatile uint8_t actuatorLeftCmd  = 0;
+volatile uint8_t actuatorRightCmd = 0;
 
 /*====================================================================
   SMALL HELPER FUNCTIONS
@@ -172,8 +175,8 @@ void printFlightTelemetry(){
   Serial.print(ctrl_vy,      3); Serial.print(',');
   Serial.print(ctrl_rollDeg, 3); Serial.print(',');
   Serial.print(ctrl_gyroY,   3); Serial.print(',');
-  Serial.print(digitalRead(ACTUATOR_LEFT_PIN));  Serial.print(',');
-  Serial.print(digitalRead(ACTUATOR_RIGHT_PIN));
+  Serial.print(actuatorLeftCmd);  Serial.print(',');
+  Serial.print(actuatorRightCmd);
   Serial.println();
 }
 
@@ -186,13 +189,24 @@ void runRollControl(){
                   computeAngleError(0.0, ctrl_rollDeg/RAD_TO_DEG),
                   computeVelocityError(ctrl_gyroY));
     int pwm = rollPwm.update(u);
-    if(pwm>0){ digitalWrite(ACTUATOR_RIGHT_PIN,HIGH); digitalWrite(ACTUATOR_LEFT_PIN,LOW);}
-    else if(pwm<0){ digitalWrite(ACTUATOR_RIGHT_PIN,LOW); digitalWrite(ACTUATOR_LEFT_PIN,HIGH);}
-    else{ digitalWrite(ACTUATOR_RIGHT_PIN,LOW); digitalWrite(ACTUATOR_LEFT_PIN,LOW);}
+    if(pwm>0){
+      digitalWrite(ACTUATOR_RIGHT_PIN,HIGH);
+      digitalWrite(ACTUATOR_LEFT_PIN,LOW);
+      actuatorRightCmd = 1;  actuatorLeftCmd  = 0;
+    }else if(pwm<0){
+      digitalWrite(ACTUATOR_RIGHT_PIN,LOW);
+      digitalWrite(ACTUATOR_LEFT_PIN,HIGH);
+      actuatorRightCmd = 0;  actuatorLeftCmd  = 1;
+    }else{
+      digitalWrite(ACTUATOR_RIGHT_PIN,LOW);
+      digitalWrite(ACTUATOR_LEFT_PIN,LOW);
+      actuatorRightCmd = 0;  actuatorLeftCmd  = 0;
+    }
   }else{
     rollPid.reset();
     digitalWrite(ACTUATOR_RIGHT_PIN,LOW);
     digitalWrite(ACTUATOR_LEFT_PIN,LOW);
+    actuatorRightCmd = 0;  actuatorLeftCmd = 0;
   }
 }
 
