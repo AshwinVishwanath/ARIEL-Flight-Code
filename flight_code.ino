@@ -367,40 +367,49 @@ float getRelativeAltitude(){
 /*---------------- SENSOR READ ----------------*/
 void getSensorData(float &ax,float &ay,float &az,
                    float &gx,float &gy,float &gz,
-                   float &mx,float &my,float &mz){
+                   float &mx,float &my,float &mz)
+{
   sensors_event_t a,g,m;
   bno.getEvent(&a,Adafruit_BNO055::VECTOR_ACCELEROMETER);
   bno.getEvent(&g,Adafruit_BNO055::VECTOR_GYROSCOPE);
   bno.getEvent(&m,Adafruit_BNO055::VECTOR_MAGNETOMETER);
-  ax=a.acceleration.x; ay=a.acceleration.y; az=a.acceleration.z;
-  gx=g.gyro.x;        gy=g.gyro.y;          gz=g.gyro.z;
-  mx=m.magnetic.x;    my=m.magnetic.y;      mz=m.magnetic.z;
+
+  ax = a.acceleration.x;  ay = a.acceleration.y;  az = a.acceleration.z;
+  gx = g.gyro.x;          gy = g.gyro.y;          gz = g.gyro.z;
+  mx = m.magnetic.x;      my = m.magnetic.y;      mz = m.magnetic.z;
 }
 
-/*---------------- ORIENTATION ----------------*/
-static float iRoll=0,iPitch=0,iYaw=0,fGx=0,fGy=0,fGz=0;
-void updateIntegratedAngles(float gx,float gy,float gz,float dt){
-  const float a=0.7f;
-  fGx=a*gx+(1-a)*fGx; fGy=a*gy+(1-a)*fGy; fGz=a*gz+(1-a)*fGz;
-  iRoll  += fGy*RAD_TO_DEG*dt;
-  iPitch += fGx*RAD_TO_DEG*dt;
-  iYaw   += fGz*RAD_TO_DEG*dt;
-  if(iRoll<0) iRoll+=360; if(iRoll>=360) iRoll-=360;
-  if(iPitch<0)iPitch+=360;if(iPitch>=360)iPitch-=360;
-  if(iYaw<0)  iYaw+=360;  if(iYaw>=360)  iYaw-=360;
-}
-void getIntegratedAngles(float &r,float &p,float &y){ r=iRoll; p=iPitch; y=iYaw; }
+/*---------------- ORIENTATION (gyro integration) ----------------*/
+static float iRoll  = 0.0f;
+static float iPitch = 0.0f;
+static float iYaw   = 0.0f;
+static float fGx    = 0.0f;
+static float fGy    = 0.0f;
+static float fGz    = 0.0f;
 
-/*---------------- EKF, LOGGING, ETC. ----------------
-  The EKF predict/update and SD logging functions
-  are the unchanged ones you posted originally.
-  (They compile as-is once the duplicates are removed.)
-----------------------------------------------------------------*/
+void updateIntegratedAngles(float gx, float gy, float gz, float dt)
+{
+  const float α = 0.7f;                    // low-pass coefficient
+  fGx = α * gx + (1 - α) * fGx;
+  fGy = α * gy + (1 - α) * fGy;
+  fGz = α * gz + (1 - α) * fGz;
 
-    roll = integratedRoll;
-    pitch = integratedPitch;
-    yaw = integratedYaw;
+  iRoll  += fGy * RAD_TO_DEG * dt;
+  iPitch += fGx * RAD_TO_DEG * dt;
+  iYaw   += fGz * RAD_TO_DEG * dt;
+
+  if (iRoll  < 0) iRoll  += 360;  if (iRoll  >= 360) iRoll  -= 360;
+  if (iPitch < 0) iPitch += 360;  if (iPitch >= 360) iPitch -= 360;
+  if (iYaw   < 0) iYaw   += 360;  if (iYaw   >= 360) iYaw   -= 360;
 }
+
+void getIntegratedAngles(float &r, float &p, float &y)
+{
+  r = iRoll;
+  p = iPitch;
+  y = iYaw;
+}
+
 
 // ---- ekf_sensor_fusion.cpp ----
 
