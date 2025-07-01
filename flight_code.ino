@@ -387,28 +387,24 @@ static float fGx    = 0.0f;
 static float fGy    = 0.0f;
 static float fGz    = 0.0f;
 
-void updateIntegratedAngles(float gx, float gy, float gz, float dt)
-{
-  const float α = 0.7f;                    // low-pass coefficient
-  fGx = α * gx + (1 - α) * fGx;
-  fGy = α * gy + (1 - α) * fGy;
-  fGz = α * gz + (1 - α) * fGz;
-
-  iRoll  += fGy * RAD_TO_DEG * dt;
-  iPitch += fGx * RAD_TO_DEG * dt;
-  iYaw   += fGz * RAD_TO_DEG * dt;
-
-  if (iRoll  < 0) iRoll  += 360;  if (iRoll  >= 360) iRoll  -= 360;
-  if (iPitch < 0) iPitch += 360;  if (iPitch >= 360) iPitch -= 360;
-  if (iYaw   < 0) iYaw   += 360;  if (iYaw   >= 360) iYaw   -= 360;
+/*---------------- ORIENTATION ----------------*/
+static float iRoll=0,iPitch=0,iYaw=0,fGx=0,fGy=0,fGz=0;
+void updateIntegratedAngles(float gx,float gy,float gz,float dt){
+  const float a=0.7f;
+  fGx=a*gx+(1-a)*fGx; fGy=a*gy+(1-a)*fGy; fGz=a*gz+(1-a)*fGz;
+  iRoll  += fGy*RAD_TO_DEG*RAD_TO_DEG*dt;
+  iPitch += fGx*RAD_TO_DEG*RAD_TO_DEG*dt;
+  iYaw   += fGz*RAD_TO_DEG*RAD_TO_DEG*dt;
+  if(iRoll<0) iRoll+=360; if(iRoll>=360) iRoll-=360;
+  if(iPitch<0)iPitch+=360;if(iPitch>=360)iPitch-=360;
+  if(iYaw<0)  iYaw+=360;  if(iYaw>=360)  iYaw-=360;
 }
+void getIntegratedAngles(float &r,float &p,float &y){ r=iRoll; p=iPitch; y=iYaw; }
 
-void getIntegratedAngles(float &r, float &p, float &y)
-{
-  r = iRoll;
-  p = iPitch;
-  y = iYaw;
-}
+/*------------------------------------------------------------------
+   (single, unique) EKF implementation begins right here …
+------------------------------------------------------------------*/
+
 
 
 // ---- ekf_sensor_fusion.cpp ----
