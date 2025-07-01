@@ -321,98 +321,206 @@ void loop() {
     digitalWrite(ACTUATOR_LEFT_PIN,  LOW);
   }
 
+  // ---- State-Specific Behavior ----
   switch (systemState) {
-
     case ASCENT: {
       // LED blinking at 2 Hz (toggle every 250 ms)
       const unsigned long ledInterval = 250;
-      static unsigned long lastLed=0;
-      static bool ls2=false;
-      if (millis()-lastLed>=ledInterval) {
-        lastLed=millis(); ls2=!ls2;
-        analogWrite(LED_PIN, ls2?255:0);
+      static unsigned long lastLed = 0;
+      static bool ledBlink = false;
+      if (millis() - lastLed >= ledInterval) {
+        lastLed = millis();
+        ledBlink = !ledBlink;
+        analogWrite(LED_PIN, ledBlink ? 255 : 0);
       }
 
       // sensor loop at operating_feq
-      static unsigned long loopLast=micros();
-      const unsigned long loopInt = 1000000UL/operating_feq;
-      unsigned long now=micros();
-      if (now-loopLast>=loopInt) {
-        loopLast=now;
+      static unsigned long loopLast = micros();
+      const unsigned long loopInt = 1000000UL / operating_feq;
+      unsigned long now = micros();
+      if (now - loopLast >= loopInt) {
+        loopLast = now;
+        float dt = PID_DT;
 
-        // Always run roll control (no lockouts)
-        double angleErr = computeAngleError(0.0, Roll * (M_PI/180.0));
-        double velErr   = computeVelocityError(gy);
-        double control  = rollPid.update(angleErr, velErr);
-        int pwmOut      = rollPwm.update(control);
+        // (Use the same ax,ay,az,gx,gy,gz,mx,my,mz,relAlt,x,y,z,vx,vy,vz,Roll,Pitch,Yaw)
 
-        // Serial print actuation
-        Serial.print("Roll: ");  Serial.print(Roll,3);
-        Serial.print(" | Gy: ");  Serial.print(gy,3);
-        Serial.print(" | PWM: "); Serial.println(pwmOut);
+        // Update maxAltitude
+        if (y > maxAltitude) maxAltitude = y;
 
-        if (pwmOut>0) {
-          digitalWrite(ACTUATOR_RIGHT_PIN, HIGH);
-          digitalWrite(ACTUATOR_LEFT_PIN, LOW);
-        } else if (pwmOut<0) {
-          digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-          digitalWrite(ACTUATOR_LEFT_PIN, HIGH);
+        // Detect ascent start
+        if (!ascentDetected && (vy > AP_VY_ASCENT_THRESHOLD)) {
+          ascentDetected = true;
+          ascentStartMicros = micros();
+        }
+        launchDetectTimestamp = micros();
+
+        // Rolling buffer index
+        int idxOffset = 2 * operating_feq;
+        int twoSecIdx = bufferIndex - idxOffset;
+        if (twoSecIdx < 0) twoSecIdx += ASCENT_BUFFER_SIZE;
+        prelaunchIndex = twoSecIdx;
+
+        // Buffering
+        if (!bufferDumped) {
+          unsigned long tsUs = micros();
+          unsigned long t_s  = tsUs / 1000000;
+          String rawLine = String(t_s) + "," +
+            String(ax,3) + "," + String(ay,3) + "," + String(az,3) + "," +
+            String(gx,3) + "," + String(gy,3) + "," + String(gz,3) + "," +
+            String(mx,3) + "," + String(my,3) + "," + String(mz,3) + "," +
+            String(relAlt,3);
+          String filtLine = String(t_s) + "," +
+            String(x,3) + "," + String(y,3) + "," + String(z,3) + "," +
+            String(vx,3) + "," + String(vy,3) + "," + String(vz,3) + "," +
+            String(Roll,3) + "," + String(Pitch,3) + "," + String(Yaw,3);
+
+          ascentBuffer[bufferIndex].rawLine      = rawLine;
+          ascentBuffer[bufferIndex].filteredLine = filtLine;
+          bufferIndex = (bufferIndex + 1) % ASCENT_BUFFER_SIZE;
+          if (bufferIndex == 0) bufferFull = true;
+
+          if (ay > ASCENT_ACCEL_THRESHOLD) {
+            if (!accelActive) {
+              accelActive = true;
+              accelStartMicros = millis();
+            } else if (millis() - accelStartMicros >= ASCENT_ACCEL_TIME_THRESHOLD) {
+              Summarylog("LAUNCH DETECTED; dumping buffer to SD.");
+              int count = bufferFull ? ASCENT_BUFFER_SIZE : bufferIndex;
+              for (int i = 0; i < count; i++) {
+                rawDataFile.println(ascentBuffer[i].rawLine);
+                filteredDataFile.println(ascentBuffer[i].filteredLine);
+              }
+              rawDataFile.flush();
+              filteredDataFile.flush();
+              bufferDumped = true;
+              bufferIndex = 0;
+              bufferFull  = false;
+              accelActive = false;
+            }
+          } else {
+            accelActive = false;
+          }
         } else {
-          digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-          digitalWrite(ACTUATOR_LEFT_PIN, LOW);
+          logSensorData();
         }
 
-        // ... (rest of ASCENT buffer, launch detect, logging as before) ...
+        if (vy > ascentVyMax)    ascentVyMax = vy;
+        if (ay > ascentAyMax)    ascentAyMax = ay;
+        if (y  > maxAltitudeSum) maxAltitudeSum = y;
+
+        // Apogee detection
+        if (!apogeeDetected && ascentDetected) {
+          if ((millis() - ascentStartMicros >= AP_MIN_ASCENT_TIME) &&
+              (vy < AP_VY_FALL_THRESHOLD) &&
+              (maxAltitude > AP_MIN_ALTITUDE) &&
+              (y < maxAltitude)) {
+            apogeeDetected     = true;
+            apogeeDetectMicros = millis();
+            Summarylog("APOGEE DETECTED.");
+            systemState        = DESCENT;
+            stateStartTime     = millis();
+          }
+        }
       }
       break;
     }
 
     case DESCENT: {
-      // LED blinking 2 Hz
-      const unsigned long li=250;
-      static unsigned long ll=0; static bool lb=false;
-      if (millis()-ll>=li) { ll=millis(); lb=!lb; analogWrite(LED_PIN, lb?255:0); }
+      // LED blinking at 2 Hz
+      const unsigned long ledInterval = 250;
+      static unsigned long lastLed = 0;
+      static bool ledBlink = false;
+      if (millis() - lastLed >= ledInterval) {
+        lastLed   = millis();
+        ledBlink  = !ledBlink;
+        analogWrite(LED_PIN, ledBlink ? 255 : 0);
+      }
 
       // sensor loop
-      static unsigned long loopLast=micros();
-      const unsigned long loopInt=1000000UL/operating_feq;
-      unsigned long now=micros();
-      if (now-loopLast>=loopInt) {
-        loopLast=now;
+      static unsigned long loopLast = micros();
+      const unsigned long loopInt = 1000000UL / operating_feq;
+      unsigned long now = micros();
+      if (now - loopLast >= loopInt) {
+        loopLast = now;
+        float dt = PID_DT;
 
-        // Always run roll control
-        double angleErr = computeAngleError(0.0, Roll * (M_PI/180.0));
-        double velErr   = computeVelocityError(gy);
-        double control  = rollPid.update(angleErr, velErr);
-        int pwmOut      = rollPwm.update(control);
+        // (Use ax,ay,az,gx,gy,gz,mx,my,mz,relAlt,x,y,z,vx,vy,vz,Roll,Pitch,Yaw)
 
-        // Serial print
-        Serial.print("Roll: ");  Serial.print(Roll,3);
-        Serial.print(" | Gy: ");  Serial.print(gy,3);
-        Serial.print(" | PWM: "); Serial.println(pwmOut);
-
-        if (pwmOut>0) {
-          digitalWrite(ACTUATOR_RIGHT_PIN, HIGH);
-          digitalWrite(ACTUATOR_LEFT_PIN, LOW);
-        } else if (pwmOut<0) {
-          digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-          digitalWrite(ACTUATOR_LEFT_PIN, HIGH);
+        // Logging rate adaptation
+        static unsigned long lastLog = 0;
+        if ((millis() - apogeeDetectMicros < POST_APOGEE_LOG_DURATION) &&
+            (fabs(vy) <= DESCENT_VY_FAST_THRESHOLD)) {
+          if (millis() - lastLog >= LOW_RATE_LOG_INTERVAL) {
+            logSensorData();
+            lastLog = millis();
+          }
         } else {
-          digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-          digitalWrite(ACTUATOR_LEFT_PIN, LOW);
+          logSensorData();
         }
 
-        // ... (rest of DESCENT logic as before) ...
+        // Landing detection
+        if (landingTimerStart == 0) {
+          landingTimerStart = millis();
+          prevAltitude      = y;
+        }
+        if ((fabs(y - prevAltitude) < LANDING_ALT_CHANGE_THRESHOLD) &&
+            (fabs(relAlt - prevAltitude) < LANDING_ALT_CHANGE_THRESHOLD)) {
+          if (millis() - landingTimerStart >= LANDING_TIME_THRESHOLD) {
+            Summarylog("Landing detected; transitioning to LANDED.");
+            systemState = LANDED;
+            stateStartTime = millis();
+            landingDetectTimestamp = millis();
+          }
+        } else {
+          landingTimerStart = millis();
+          prevAltitude      = y;
+        }
+
+        // Serial telemetry
+        Serial.print(">");
+        Serial.print("altitude:"); Serial.print(y,3);
+        Serial.print(", vy:");       Serial.print(vy,3);
+        Serial.print(", roll:");     Serial.print(Roll,3);
+        Serial.print(", pitch:");    Serial.print(Pitch,3);
+        Serial.print(", yaw:");      Serial.print(Yaw,3);
+        Serial.print(", ay:");       Serial.print(ay,3);
+        Serial.println();
       }
       break;
     }
 
     case LANDED: {
-      // LED 1 Hz
-      const unsigned long li=500;
-      static unsigned long ll=0; static bool lb=false;
-      if (millis()-ll>=li) { ll=millis(); lb=!lb; analogWrite(LED_PIN, lb?255:0); }
-      // ... (FLIGHT SUMMARY, idle) ...
+      // LED blinking at 1 Hz
+      const unsigned long ledInterval = 500;
+      static unsigned long lastLed = 0;
+      static bool ledBlink = false;
+      if (millis() - lastLed >= ledInterval) {
+        lastLed   = millis();
+        ledBlink  = !ledBlink;
+        analogWrite(LED_PIN, ledBlink ? 255 : 0);
+      }
+
+      // Final logging & summary
+      logFilteredData();
+      flushAllBuffers();
+
+      Summarylog("Flight ended. Logging stopped.");
+      Summarylog("===== FLIGHT SUMMARY =====");
+      Summarylog("Launch at: " + String(launchDetectTimestamp) + " µs");
+      Summarylog("Prelaunch entry: " +
+                 ascentBuffer[prelaunchIndex].filteredLine);
+      float apogeeTimeSec = (apogeeDetectMicros - launchDetectTimestamp) / 1000.0f;
+      Summarylog("Apogee at: " + String(apogeeTimeSec,2) + " s after launch");
+      unsigned long landingTimeCorrected = landingDetectTimestamp - LANDING_TIME_THRESHOLD;
+      Summarylog("Landing at: " + String(landingTimeCorrected) + " ms");
+      Summarylog("Max vy: " + String(ascentVyMax,3) + " m/s");
+      Summarylog("Max ay: " + String(ascentAyMax,3) + " m/s²");
+      Summarylog("Max altitude: " + String(maxAltitudeSum,3) + " m");
+      Summarylog("===========================");
+      
+      while (1) {
+        // Idle forever
+      }
       break;
     }
   }
@@ -420,15 +528,16 @@ void loop() {
 
 // =================== Function Implementations ===================
 
-// ---- sensor_setup.cpp ----
 void setupSensors() {
+  // BNO055 init
   if (!bno.begin()) {
     Summarylog("ERROR: BNO055 init failed!"); while (1);
   }
   bno.setExtCrystalUse(true);
   bno.setSensorOffsets(BNO_CALIBRATION_OFFSETS);
-  Summarylog("BNO055 ready.");
+  Summarylog("BNO055 initialized.");
 
+  // BMP388 init
   if (!bmp.begin_I2C(0x76, &Wire1)) {
     Summarylog("ERROR: BMP388 init failed!"); while (1);
   }
@@ -436,156 +545,188 @@ void setupSensors() {
   bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_16X);
   bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_DISABLE);
   bmp.setOutputDataRate(BMP3_ODR_200_HZ);
+  Summarylog("BMP388 initialized.");
 
   altitudeBias = manualCalibrateBMP388();
-  baselineAltitude = bmp.performReading()
-    ? (bmp.readAltitude(1013.25) - altitudeBias)
-    : 0.0f;
+  if (bmp.performReading()) {
+    baselineAlt = bmp.readAltitude(1013.25) - altitudeBias;
+  }
 }
 
 float manualCalibrateBMP388() {
-  Summarylog("BMP388 manual calibration start...");
-  const int N=1000; float sum=0;
-  for (int i=0;i<N;i++){
-    if (bmp.performReading()) sum+=bmp.readAltitude(1013.25);
-    if (i%100==0) {
-      char buf[32];
-      sprintf(buf,"Calib %.1f%%",(i/(float)N)*100);
+  Summarylog("BMP388 calibration start...");
+  const int N = 1000;
+  float sum = 0.0f;
+  for (int i = 0; i < N; i++) {
+    if (bmp.performReading()) sum += bmp.readAltitude(1013.25);
+    if (i % 100 == 0) {
+      char buf[50];
+      sprintf(buf, "Calib progress: %.1f%%", (i/(float)N)*100);
       Summarylog(buf);
     }
   }
-  float bias=sum/N;
-  Summarylog(String("BMP388 bias=")+bias);
+  float bias = sum / N;
+  Summarylog("BMP388 bias = " + String(bias));
   return bias;
 }
 
-float getRelativeAltitude(){
+float getRelativeAltitude() {
   if (!bmp.performReading()) {
     Summarylog("ERROR: baro read failed");
     return 0.0f;
   }
-  float a=bmp.readAltitude(1013.25)-altitudeBias;
-  return a-baselineAltitude;
+  float a = bmp.readAltitude(1013.25) - altitudeBias;
+  return a - baselineAlt;
 }
 
-void getSensorData(float &ax,float &ay,float &az,
-                   float &gx,float &gy,float &gz,
-                   float &mx,float &my,float &mz){
-  sensors_event_t ae,ge,me;
-  bno.getEvent(&ae,Adafruit_BNO055::VECTOR_ACCELEROMETER);
-  bno.getEvent(&ge,Adafruit_BNO055::VECTOR_GYROSCOPE);
-  bno.getEvent(&me,Adafruit_BNO055::VECTOR_MAGNETOMETER);
-  ax=ae.acceleration.x; ay=ae.acceleration.y; az=ae.acceleration.z;
-  gx=ge.gyro.x; gy=ge.gyro.y; gz=ge.gyro.z;
-  mx=me.magnetic.x; my=me.magnetic.y; mz=me.magnetic.z;
+void getSensorData(float &ax, float &ay, float &az,
+                   float &gx, float &gy, float &gz,
+                   float &mx, float &my, float &mz) {
+  sensors_event_t ae, ge, me;
+  bno.getEvent(&ae, Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  bno.getEvent(&ge, Adafruit_BNO055::VECTOR_GYROSCOPE);
+  bno.getEvent(&me, Adafruit_BNO055::VECTOR_MAGNETOMETER);
+  ax = ae.acceleration.x; ay = ae.acceleration.y; az = ae.acceleration.z;
+  gx = ge.gyro.x;         gy = ge.gyro.y;         gz = ge.gyro.z;
+  mx = me.magnetic.x;     my = me.magnetic.y;     mz = me.magnetic.z;
 }
 
-// ---- orientation_estimation.cpp ----
-static float iRoll=0,iPitch=0,iYaw=0;
-void updateIntegratedAngles(float gx,float gy,float gz,float dt){
-  const float α=0.7f;
-  static float fGx=0,fGy=0,fGz=0;
-  fGx=α*gx+(1-α)*fGx; fGy=α*gy+(1-α)*fGy; fGz=α*gz+(1-α)*fGz;
-  iRoll+=fGx*(180.0/M_PI)*dt;
-  iPitch+=fGy*(180.0/M_PI)*dt;
-  iYaw+=fGz*(180.0/M_PI)*dt;
-  if(iRoll<0)iRoll+=360; if(iRoll>=360)iRoll-=360;
-  if(iPitch<0)iPitch+=360;if(iPitch>=360)iPitch-=360;
-  if(iYaw<0)iYaw+=360;if(iYaw>=360)iYaw-=360;
-}
-void getIntegratedAngles(float &r,float &p,float &y){
-  r=iRoll; p=iPitch; y=iYaw;
+static float iRoll=0, iPitch=0, iYaw=0;
+void updateIntegratedAngles(float gx, float gy, float gz, float dt) {
+  const float alpha = 0.7f;
+  static float fGx=0, fGy=0, fGz=0;
+  fGx = alpha*gx + (1-alpha)*fGx;
+  fGy = alpha*gy + (1-alpha)*fGy;
+  fGz = alpha*gz + (1-alpha)*fGz;
+  iRoll  += fGx  * (180.0/M_PI) * dt;
+  iPitch += fGy  * (180.0/M_PI) * dt;
+  iYaw   += fGz  * (180.0/M_PI) * dt;
+  if (iRoll  < 0) iRoll  += 360; else if (iRoll  >=360) iRoll  -=360;
+  if (iPitch < 0) iPitch += 360; else if (iPitch >=360) iPitch -=360;
+  if (iYaw   < 0) iYaw   += 360; else if (iYaw   >=360) iYaw   -=360;
 }
 
-// ---- ekf_sensor_fusion.cpp ----
-void ekfInit(float x,float y,float z,float vx,float vy,float vz){
-  x_mean=Eigen::VectorXf(n_x);
-  P=Eigen::MatrixXf::Identity(n_x,n_x)*0.1f;
-  Q=Eigen::MatrixXf::Zero(n_x,n_x);
-  R=Eigen::MatrixXf::Zero(n_z,n_z);
-  x_mean<<x,y,z,vx,vy,vz;
-  Q(0,0)=0.02f;Q(1,1)=0.04f;Q(2,2)=0.03f;
-  Q(3,3)=0.4f; Q(4,4)=0.36f;Q(5,5)=0.32f;
+void getIntegratedAngles(float &roll, float &pitch, float &yaw) {
+  roll = iRoll; pitch = iPitch; yaw = iYaw;
+}
+
+void ekfInit(float x, float y, float z, float vx, float vy, float vz) {
+  x_mean = Eigen::VectorXf(n_x);
+  P = Eigen::MatrixXf::Identity(n_x,n_x)*0.1f;
+  Q = Eigen::MatrixXf::Zero(n_x,n_x);
+  R = Eigen::MatrixXf::Zero(n_z,n_z);
+  x_mean << x,y,z,vx,vy,vz;
+  Q(0,0)=0.02f; Q(1,1)=0.04f; Q(2,2)=0.03f;
+  Q(3,3)=0.4f;  Q(4,4)=0.36f; Q(5,5)=0.32f;
   R(0,0)=0.3f;
-  ekfInitialized=true;
+  ekfInitialized = true;
 }
-void ekfPredict(float ax,float ay,float az,float dt){
-  if(!ekfInitialized) return;
-  float x=x_mean(0),y=x_mean(1),z=x_mean(2),
-        vx=x_mean(3),vy=x_mean(4),vz=x_mean(5);
+
+void ekfPredict(float ax, float ay, float az, float dt) {
+  if (!ekfInitialized) return;
+  float x=x_mean(0), y=x_mean(1), z=x_mean(2),
+        vx=x_mean(3), vy=x_mean(4), vz=x_mean(5);
   auto f = [&](float vx_,float vy_,float vz_,float ax_,float ay_,float az_){
     Eigen::VectorXf d(n_x);
-    d<<vx_,vy_,vz_,ax_,ay_,az_;
+    d << vx_,vy_,vz_,ax_,ay_,az_;
     return d;
   };
   Eigen::VectorXf k1=f(vx,vy,vz,ax,ay,az),
-                   k2=f(vx+0.5f*k1(3)*dt,vy+0.5f*k1(4)*dt,vz+0.5f*k1(5)*dt,ax,ay,az),
-                   k3=f(vx+0.5f*k2(3)*dt,vy+0.5f*k2(4)*dt,vz+0.5f*k2(5)*dt,ax,ay,az),
-                   k4=f(vx+k3(3)*dt,vy+k3(4)*dt,vz+k3(5)*dt,ax,ay,az);
-  Eigen::VectorXf dx=(dt/6.0f)*(k1+2*k2+2*k3+k4);
-  x+=dx(0); y+=dx(1); z+=dx(2);
-  vx+=dx(3);vy+=dx(4);vz+=dx(5);
-  Eigen::VectorXf x_pred(n_x); x_pred<<x,y,z,vx,vy,vz;
-  Eigen::MatrixXf f_mat=Eigen::MatrixXf::Identity(n_x,n_x);
-  f_mat(0,3)=dt;f_mat(1,4)=dt;f_mat(2,5)=dt;
-  P = f_mat*P*f_mat.transpose() + Q;
+                   k2=f(vx+0.5f*k1(3)*dt, vy+0.5f*k1(4)*dt, vz+0.5f*k1(5)*dt, ax,ay,az),
+                   k3=f(vx+0.5f*k2(3)*dt, vy+0.5f*k2(4)*dt, vz+0.5f*k2(5)*dt, ax,ay,az),
+                   k4=f(vx+k3(3)*dt,     vy+k3(4)*dt,     vz+k3(5)*dt,     ax,ay,az);
+  Eigen::VectorXf dx = (dt/6.0f)*(k1 + 2*k2 + 2*k3 + k4);
+  x  += dx(0); y  += dx(1); z  += dx(2);
+  vx += dx(3); vy += dx(4); vz += dx(5);
+  Eigen::VectorXf x_pred(n_x); x_pred << x,y,z,vx,vy,vz;
+  Eigen::MatrixXf f_mat = Eigen::MatrixXf::Identity(n_x,n_x);
+  f_mat(0,3)=dt; f_mat(1,4)=dt; f_mat(2,5)=dt;
+  P = f_mat * P * f_mat.transpose() + Q;
   x_mean = x_pred;
 }
-void ekfUpdateBaro(float alt_meas){
-  if(!ekfInitialized) return;
-  Eigen::VectorXf z(1),h(1);
+
+void ekfUpdateBaro(float alt_meas) {
+  if (!ekfInitialized) return;
+  Eigen::VectorXf z(1), h(1);
   z(0)=alt_meas; h(0)=x_mean(1);
-  Eigen::VectorXf y_err=z-h;
-  Eigen::MatrixXf H=Eigen::MatrixXf::Zero(1,n_x);H(0,1)=1;
-  Eigen::MatrixXf S=H*P*H.transpose()+R;
-  Eigen::MatrixXf K=P*H.transpose()*S.inverse();
-  x_mean+=K*y_err;
-  P=(Eigen::MatrixXf::Identity(n_x,n_x)-K*H)*P;
-  lastKalmanGain=K;
-}
-void ekfGetState(float &x,float &y,float &z,float &vx,float &vy,float &vz){
-  x=x_mean(0);y=x_mean(1);z=x_mean(2);
-  vx=x_mean(3);vy=x_mean(4);vz=x_mean(5);
+  Eigen::VectorXf y_err = z - h;
+  Eigen::MatrixXf H = Eigen::MatrixXf::Zero(1,n_x);
+  H(0,1)=1.0f;
+  Eigen::MatrixXf S = H*P*H.transpose() + R;
+  Eigen::MatrixXf K = P*H.transpose()*S.inverse();
+  x_mean += K * y_err;
+  P = (Eigen::MatrixXf::Identity(n_x,n_x) - K*H) * P;
+  lastKalmanGain = K;
 }
 
-// ---- datalogging.cpp ----
-String rawDataBuffer="",filteredDataBuffer="",systemLogBuffer="";
-int rawDataCount=0,filteredDataCount=0,systemLogCount=0;
-const int RAW_THRESH=100,FILT_THRESH=100,SYS_THRESH=1;
-void flushBuffer(File &f,String &b,int &c){
-  if(f){f.print(b);f.flush();}
-  b="";c=0;
+void ekfGetState(float &x, float &y, float &z,
+                 float &vx, float &vy, float &vz) {
+  x = x_mean(0);
+  y = x_mean(1);
+  z = x_mean(2);
+  vx = x_mean(3);
+  vy = x_mean(4);
+  vz = x_mean(5);
 }
-void flushSystemLog(){flushBuffer(systemLogFile,systemLogBuffer,systemLogCount);}
-void Summarylog(const String &msg){
-  unsigned long t=micros();
-  systemLogBuffer+=String(t)+": "+msg+"\n";systemLogCount++;
-  if(systemLogCount>=SYS_THRESH) flushSystemLog();
+
+// ------------------- Logging & File I/O -------------------
+
+String rawDataBuffer       = "";
+String filteredDataBuffer  = "";
+String systemLogBuffer     = "";
+int    rawDataCount        = 0;
+int    filteredDataCount   = 0;
+int    systemLogCount      = 0;
+const int RAW_THRESH  = 100;
+const int FILT_THRESH = 100;
+const int SYS_THRESH  = 1;
+
+void flushBuffer(File &f, String &b, int &c) {
+  if (f) { f.print(b); f.flush(); }
+  b = ""; c = 0;
 }
-void logData(File &f,String &b,int &c,const String &d,int th){
-  b+=d+"\n";c++; if(c>=th) flushBuffer(f,b,c);
+
+void flushSystemLog() {
+  flushBuffer(systemLogFile, systemLogBuffer, systemLogCount);
+}
+
+void Summarylog(const String &msg) {
+  unsigned long t = micros();
+  systemLogBuffer += String(t) + ": " + msg + "\n";
+  systemLogCount++;
+  if (systemLogCount >= SYS_THRESH) {
+    flushSystemLog();
+  }
+}
+
+void logData(File &f, String &b, int &c, const String &d, int thresh) {
+  b += d + "\n";
+  c++;
+  if (c >= thresh) {
+    flushBuffer(f, b, c);
+  }
 }
 
 void setupFiles() {
   // Initialize SD card
   if (!SD.begin(BUILTIN_SDCARD)) {
-    Summarylog("ERROR: SD initialization failed!");
+    Summarylog("ERROR: SD init failed!");
   } else {
-    Summarylog("SD initialized successfully.");
+    Summarylog("SD initialized.");
   }
 
-  // Open or create the data files
-  rawDataFile      = SD.open("Raw_Data.csv",       FILE_WRITE);
-  filteredDataFile = SD.open("Filtered_Data.csv",  FILE_WRITE);
-  systemLogFile    = SD.open("summarylog.txt",     FILE_WRITE);
+  // Open files
+  rawDataFile      = SD.open("Raw_Data.csv",      FILE_WRITE);
+  filteredDataFile = SD.open("Filtered_Data.csv", FILE_WRITE);
+  systemLogFile    = SD.open("summarylog.txt",    FILE_WRITE);
 
   if (!rawDataFile || !filteredDataFile || !systemLogFile) {
-    Summarylog("ERROR: Failed to open one or more log files!");
+    Summarylog("ERROR: File open failed!");
   } else {
-    Summarylog("Successfully opened Raw_Data.csv, Filtered_Data.csv, and summarylog.txt.");
+    Summarylog("Opened Raw_Data.csv, Filtered_Data.csv, summarylog.txt");
   }
 
-  // Write CSV headers
+  // Write headers
   if (rawDataFile) {
     rawDataFile.println("time(s),ax,ay,az,gx,gy,gz,mx,my,mz,baroAlt");
     rawDataFile.flush();
@@ -596,30 +737,44 @@ void setupFiles() {
   }
 }
 
-
-void logRawData(){
-  float ax,ay,az,gx,gy,gz,mx,my,mz;
-  getSensorData(ax,ay,az,gx,gy,gz,mx,my,mz);
+void logRawData() {
+  float ax, ay, az, gx, gy, gz, mx, my, mz;
+  getSensorData(ax, ay, az, gx, gy, gz, mx, my, mz);
   bmp.performReading();
-  float baro=getRelativeAltitude();
-  unsigned long ts=micros()/1000000;
-  String l=String(ts)+","+String(ax,3)+","+String(ay,3)+","+String(az,3)+
-           ","+String(gx,3)+","+String(gy,3)+","+String(gz,3)+
-           ","+String(mx,3)+","+String(my,3)+","+String(mz,3)+","+String(baro,3);
-  logData(rawDataFile,rawDataBuffer,rawDataCount,l,RAW_THRESH);
+  float baro = getRelativeAltitude();
+
+  unsigned long t_s = micros() / 1000000;
+  String line = String(t_s) + "," +
+    String(ax,3) + "," + String(ay,3) + "," + String(az,3) + "," +
+    String(gx,3) + "," + String(gy,3) + "," + String(gz,3) + "," +
+    String(mx,3) + "," + String(my,3) + "," + String(mz,3) + "," +
+    String(baro,3);
+
+  logData(rawDataFile, rawDataBuffer, rawDataCount, line, RAW_THRESH);
 }
-void logFilteredData(){
-  float x,y,z,vx,vy,vz; ekfGetState(x,y,z,vx,vy,vz);
-  float r,p,yw; getIntegratedAngles(r,p,yw);
-  unsigned long ts=micros()/1000000;
-  String l=String(ts)+","+String(x,3)+","+String(y,3)+","+String(z,3)+
-           ","+String(vx,3)+","+String(vy,3)+","+String(vz,3)+
-           ","+String(r,3)+","+String(p,3)+","+String(yw,3);
-  logData(filteredDataFile,filteredDataBuffer,filteredDataCount,l,FILT_THRESH);
+
+void logFilteredData() {
+  float x,y,z,vx,vy,vz;
+  ekfGetState(x,y,z,vx,vy,vz);
+  float r,p,yw;
+  getIntegratedAngles(r,p,yw);
+
+  unsigned long t_s = micros() / 1000000;
+  String line = String(t_s) + "," +
+    String(x,3) + "," + String(y,3) + "," + String(z,3) + "," +
+    String(vx,3) + "," + String(vy,3) + "," + String(vz,3) + "," +
+    String(r,3) + "," + String(p,3) + "," + String(yw,3);
+
+  logData(filteredDataFile, filteredDataBuffer, filteredDataCount, line, FILT_THRESH);
 }
-void logSensorData(){ logRawData(); logFilteredData(); }
-void flushAllBuffers(){
-  flushBuffer(rawDataFile,rawDataBuffer,rawDataCount);
-  flushBuffer(filteredDataFile,filteredDataBuffer,filteredDataCount);
+
+void logSensorData() {
+  logRawData();
+  logFilteredData();
+}
+
+void flushAllBuffers() {
+  flushBuffer(rawDataFile,      rawDataBuffer,      rawDataCount);
+  flushBuffer(filteredDataFile, filteredDataBuffer, filteredDataCount);
   flushSystemLog();
 }
