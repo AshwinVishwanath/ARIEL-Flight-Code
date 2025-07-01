@@ -155,6 +155,37 @@ private:
 PIDController rollPid(PID_KP, PID_KI, PID_KD, PID_DT);
 PWMGenerator rollPwm(PID_PWM_FREQ, PID_DT);
 
+// --------- NEW: globals that feed the always-on control loop ----------
+volatile float ctrl_rollDeg = 0.0f;   // roll angle (deg)
+volatile float ctrl_gyroY   = 0.0f;   // body-frame y-gyro (rad/s)
+volatile float ctrl_alt_m   = 0.0f;   // altitude from EKF (m)
+
+// --------- NEW: independent control loop (runs every PID_DT) ----------
+void runRollControl()
+{
+  if (ctrl_alt_m > PID_ACTIVATE_ALT) {
+    double angleErr = computeAngleError(0.0, ctrl_rollDeg / RAD_TO_DEG);
+    double velErr   = computeVelocityError(ctrl_gyroY);
+    double u        = rollPid.update(angleErr, velErr);
+    int pwmOut      = rollPwm.update(u);
+
+    if (pwmOut > 0) {
+      digitalWrite(ACTUATOR_RIGHT_PIN, HIGH);
+      digitalWrite(ACTUATOR_LEFT_PIN,  LOW);
+    } else if (pwmOut < 0) {
+      digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
+      digitalWrite(ACTUATOR_LEFT_PIN,  HIGH);
+    } else {
+      digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
+      digitalWrite(ACTUATOR_LEFT_PIN,  LOW);
+    }
+  } else {
+    rollPid.reset();
+    digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
+    digitalWrite(ACTUATOR_LEFT_PIN,  LOW);
+  }
+}
+
 // Flight state definitions:
 enum SystemState {
   INIT,          // On Start Up
@@ -220,6 +251,8 @@ void setup() {
 
 // =================== Loop Function ===================
 void loop() {
+
+  // ------------- 1) STATE MACHINE -------------
   switch(systemState) {
 
     case INIT: {
@@ -273,163 +306,135 @@ void loop() {
       break;
     }
 
-  case ASCENT: {
-  // LED blinking at 2 Hz (toggle every 250 ms)
-  const unsigned long ledInterval = 250;
-  static unsigned long lastLedToggle = 0;
-  static bool ledState = false;
-  if (millis() - lastLedToggle >= ledInterval) {
-    lastLedToggle = millis();
-    ledState = !ledState; // sets LED state to opposite of what is set - on start up sets from false to true
-    analogWrite(LED_PIN, ledState ? 255 : 0);
-  }
-  
-  // loop cycle for sensor processing and logging at operating_feq
-  static unsigned long loopStartTime = micros();
-  const unsigned long loopInterval = 1000000UL / operating_feq;
-  unsigned long currentTime = micros();
-  
-  // New static flag: once we dump the rolling buffer, we stop using it.
-  static bool ascentBufferDumped = false;
-
-
-  if (currentTime - loopStartTime >= loopInterval) {
-    loopStartTime = currentTime;
-    float dt = PID_DT; // derived from operating_feq
-    
-    // Read sensor data and update EKF/orientation
-    float ax, ay, az, gx, gy, gz, mx, my, mz;
-    getSensorData(ax, ay, az, gx, gy, gz, mx, my, mz); // reads AX,Y,Z, GX,Y,Z, and MX,Y.Z
-    float relAlt = getRelativeAltitude();
-    ekfPredict(ax, ay, az, dt);
-    ekfUpdateBaro(relAlt); // predicts altitude based on accel values and measures with barometric values
-    float x, y, z, vx, vy, vz;
-    ekfGetState(x, y, z, vx, vy, vz); // writes filtered values to the variables
-    updateIntegratedAngles(gx, gy, gz, dt);
-    float Roll, Pitch, Yaw;
-    getIntegratedAngles(Roll, Pitch, Yaw);
-
-    // Altitude-triggered roll control
-    if (y > PID_ACTIVATE_ALT) {
-      double angleErr = computeAngleError(0.0, roll / RAD_TO_DEG);
-      double velErr   = computeVelocityError(gy);
-      double control  = rollPid.update(angleErr, velErr);
-      int pwmOut      = rollPwm.update(control);
-      if (pwmOut > 0) {
-        digitalWrite(ACTUATOR_RIGHT_PIN, HIGH);
-        digitalWrite(ACTUATOR_LEFT_PIN, LOW);
-      } else if (pwmOut < 0) {
-        digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-        digitalWrite(ACTUATOR_LEFT_PIN, HIGH);
-      } else {
-        digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-        digitalWrite(ACTUATOR_LEFT_PIN, LOW);
-      }
-    } else {
-      rollPid.reset();
-      digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-      digitalWrite(ACTUATOR_LEFT_PIN, LOW);
-    }
-    
-    // Update maximum altitude for apogee detection.
-    if (y > maxAltitude) {
-      maxAltitude = y;
-    }
-    
-    // Mark ascent detection when vertical velocity exceeds threshold.
-    if (!ascentDetected && (vy > AP_VY_ASCENT_THRESHOLD)) {
-      ascentDetected = true;
-      ascentStartTime = micros();
-    }
-    
-    launchDetectTimestamp = micros();  // or millis() if you're using millis() throughout
-
-    // Index for 2 seconds before launch, assuming 200 Hz
-    int indexOffset = 2 * 200; // 2 seconds * 200 samples/sec
-    int twoSecIndex = ascentBufferIndex - indexOffset;
-    if (twoSecIndex < 0) twoSecIndex += ASCENT_BUFFER_SIZE;
-    ascentEntryTwoSecondsBeforeLaunchIndex = twoSecIndex;
-
-    // If the rolling buffer has not yet been dumped…
-    if (!ascentBufferDumped) {
-      // Create CSV strings for raw and filtered data.
-      unsigned long timestamp = micros();
-      unsigned long Time_S = timestamp/1000000;
-      String rawLine = String(Time_S) + "," +
-                       String(ax, 3) + "," + String(ay, 3) + "," + String(az, 3) + "," +
-                       String(gx, 3) + "," + String(gy, 3) + "," + String(gz, 3) + "," +
-                       String(mx, 3) + "," + String(my, 3) + "," + String(mz, 3) + "," +
-                       String(relAlt, 3);
-      String filteredLine = String(Time_S) + "," +
-                            String(x, 3) + "," + String(y, 3) + "," + String(z, 3) + "," +
-                            String(vx, 3) + "," + String(vy, 3) + "," + String(vz, 3) + "," +
-                            String(Roll, 3) + "," + String(Pitch, 3) + "," + String(Yaw, 3);
-      
-      // Store log entries in the cyclic (rolling) buffer.
-      ascentRollingBuffer[ascentBufferIndex].rawLine = rawLine;
-      ascentRollingBuffer[ascentBufferIndex].filteredLine = filteredLine;
-      ascentBufferIndex = (ascentBufferIndex + 1) % ASCENT_BUFFER_SIZE;
-      if (ascentBufferIndex == 0) {
-        ascentBufferFull = true;
+    case ASCENT: {
+      // LED blinking at 2 Hz (toggle every 250 ms)
+      const unsigned long ledInterval = 250;
+      static unsigned long lastLedToggle = 0;
+      static bool ledState = false;
+      if (millis() - lastLedToggle >= ledInterval) {
+        lastLedToggle = millis();
+        ledState = !ledState;
+        analogWrite(LED_PIN, ledState ? 255 : 0);
       }
       
-      // Check if Y acceleration exceeds threshold continuously.
-      if (ay > ASCENT_ACCEL_THRESHOLD) {
-        if (!ascentAccelActive) {
-          ascentAccelActive = true;
-          ascentAccelStartTime = millis();
-        } else {
-          if (millis() - ascentAccelStartTime >= ASCENT_ACCEL_TIME_THRESHOLD) {
-            Summarylog("LAUNCH DETECTED; dumping rolling buffer to SD.");
-            int count = (ascentBufferFull ? ASCENT_BUFFER_SIZE : ascentBufferIndex);
-            for (int i = 0; i < count; i++) {
-              rawDataFile.println(ascentRollingBuffer[i].rawLine);
-              filteredDataFile.println(ascentRollingBuffer[i].filteredLine);
+      // loop cycle for sensor processing and logging at operating_feq
+      static unsigned long loopStartTime = micros();
+      const unsigned long loopInterval = 1000000UL / operating_feq;
+      unsigned long currentTime = micros();
+      
+      // New static flag: once we dump the rolling buffer, we stop using it.
+      static bool ascentBufferDumped = false;
+
+      if (currentTime - loopStartTime >= loopInterval) {
+        loopStartTime = currentTime;
+        float dt = PID_DT; // derived from operating_feq
+        
+        // Read sensor data and update EKF/orientation
+        float ax, ay, az, gx, gy, gz, mx, my, mz;
+        getSensorData(ax, ay, az, gx, gy, gz, mx, my, mz);
+        float relAlt = getRelativeAltitude();
+        ekfPredict(ax, ay, az, dt);
+        ekfUpdateBaro(relAlt);
+        float x, y, z, vx, vy, vz;
+        ekfGetState(x, y, z, vx, vy, vz);
+        updateIntegratedAngles(gx, gy, gz, dt);
+        float Roll, Pitch, Yaw;
+        getIntegratedAngles(Roll, Pitch, Yaw);
+
+        // -------- feed globals for always-running control loop ----------
+        ctrl_rollDeg = Roll;
+        ctrl_gyroY   = gy;
+        ctrl_alt_m   = y;
+        
+        // Update maximum altitude for apogee detection.
+        if (y > maxAltitude) {
+          maxAltitude = y;
+        }
+        
+        // Mark ascent detection when vertical velocity exceeds threshold.
+        if (!ascentDetected && (vy > AP_VY_ASCENT_THRESHOLD)) {
+          ascentDetected = true;
+          ascentStartTime = micros();
+        }
+        
+        launchDetectTimestamp = micros();
+
+        // Index for 2 seconds before launch, assuming 200 Hz
+        int indexOffset = 2 * 200; // 2 seconds * 200 samples/sec
+        int twoSecIndex = ascentBufferIndex - indexOffset;
+        if (twoSecIndex < 0) twoSecIndex += ASCENT_BUFFER_SIZE;
+        ascentEntryTwoSecondsBeforeLaunchIndex = twoSecIndex;
+
+        // Buffer management & launch detection as before
+        if (!ascentBufferDumped) {
+          // Create CSV strings for raw and filtered data.
+          unsigned long timestamp = micros();
+          unsigned long Time_S = timestamp/1000000;
+          String rawLine = String(Time_S) + "," +
+                           String(ax, 3) + "," + String(ay, 3) + "," + String(az, 3) + "," +
+                           String(gx, 3) + "," + String(gy, 3) + "," + String(gz, 3) + "," +
+                           String(mx, 3) + "," + String(my, 3) + "," + String(mz, 3) + "," +
+                           String(relAlt, 3);
+          String filteredLine = String(Time_S) + "," +
+                                String(x, 3) + "," + String(y, 3) + "," + String(z, 3) + "," +
+                                String(vx, 3) + "," + String(vy, 3) + "," + String(vz, 3) + "," +
+                                String(Roll, 3) + "," + String(Pitch, 3) + "," + String(Yaw, 3);
+          
+          ascentRollingBuffer[ascentBufferIndex].rawLine = rawLine;
+          ascentRollingBuffer[ascentBufferIndex].filteredLine = filteredLine;
+          ascentBufferIndex = (ascentBufferIndex + 1) % ASCENT_BUFFER_SIZE;
+          if (ascentBufferIndex == 0) {
+            ascentBufferFull = true;
+          }
+          
+          // Check if Y acceleration exceeds threshold continuously.
+          if (ay > ASCENT_ACCEL_THRESHOLD) {
+            if (!ascentAccelActive) {
+              ascentAccelActive = true;
+              ascentAccelStartTime = millis();
+            } else {
+              if (millis() - ascentAccelStartTime >= ASCENT_ACCEL_TIME_THRESHOLD) {
+                Summarylog("LAUNCH DETECTED; dumping rolling buffer to SD.");
+                int count = (ascentBufferFull ? ASCENT_BUFFER_SIZE : ascentBufferIndex);
+                for (int i = 0; i < count; i++) {
+                  rawDataFile.println(ascentRollingBuffer[i].rawLine);
+                  filteredDataFile.println(ascentRollingBuffer[i].filteredLine);
+                }
+                rawDataFile.flush();
+                filteredDataFile.flush();
+                ascentBufferDumped = true;
+                ascentBufferIndex = 0;
+                ascentBufferFull = false;
+                ascentAccelActive = false;
+              }
             }
-            rawDataFile.flush();
-            filteredDataFile.flush();
-            // Mark the buffer as dumped so that further samples bypass the rolling buffer.
-            ascentBufferDumped = true;
-            // Optionally, reset the rolling buffer variables.
-            ascentBufferIndex = 0;
-            ascentBufferFull = false;
+          } else {
             ascentAccelActive = false;
           }
+        } 
+        else {
+          logSensorData();
         }
-      } else {
-        ascentAccelActive = false;
+        if (vy > ascentBufferVyMax) ascentBufferVyMax = vy;
+        if (ay > ascentBufferAyMax) ascentBufferAyMax = ay;
+        if (y > maxAltitudeSummary) maxAltitudeSummary = y;
+        
+        // Apogee detection
+        if (!apogeeDetected && ascentDetected) {
+          if ((millis() - ascentStartTime >= AP_MIN_ASCENT_TIME) &&
+              (vy < AP_VY_FALL_THRESHOLD) &&
+              (maxAltitude > AP_MIN_ALTITUDE) &&
+              (y < maxAltitude)) {
+            apogeeDetected = true;
+            apogeeTimestamp = millis();
+            Summarylog("APOGEE DETECTED.");
+            systemState = DESCENT;
+            stateStartTime = millis();
+          }
+        }
       }
-    } 
-    // If the buffer has already been dumped, log directly to SD.
-    else {
-      logSensorData();
+      break;
     }
-    if (vy > ascentBufferVyMax) ascentBufferVyMax = vy;
-    if (ay > ascentBufferAyMax) ascentBufferAyMax = ay;
-    if (y > maxAltitudeSummary) maxAltitudeSummary = y;
-
-    
-    // Apogee detection: if ascent duration, velocity drop, and altitude conditions are met.
-    if (!apogeeDetected && ascentDetected) {
-      if ((millis() - ascentStartTime >= AP_MIN_ASCENT_TIME) &&
-          (vy < AP_VY_FALL_THRESHOLD) &&
-          (maxAltitude > AP_MIN_ALTITUDE) &&
-          (y < maxAltitude)) {
-        apogeeDetected = true;
-        apogeeTimestamp = millis();
-        Summarylog("APOGEE DETECTED.");
-        // Disable actuators and reset controller when entering DESCENT
-        rollPid.reset();
-        digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-        digitalWrite(ACTUATOR_LEFT_PIN, LOW);
-        systemState = DESCENT;
-        stateStartTime = millis();
-      }
-    }
-  }
-  break;
-}
-
 
     case DESCENT: {
       // LED blinking at 2 Hz
@@ -442,7 +447,6 @@ void loop() {
         analogWrite(LED_PIN, ledState ? 255 : 0);
       }
       
-      // sensor processing loop in descent at operating_feq
       static unsigned long loopStartTime = micros();
       const unsigned long loopInterval = 1000000UL / operating_feq;
       unsigned long currentTime = micros();
@@ -462,14 +466,13 @@ void loop() {
         float Roll, Pitch, Yaw;
         getIntegratedAngles(Roll, Pitch, Yaw);
 
-        // No roll control during descent. Ensure actuators are off and PID reset.
-        rollPid.reset();
-        digitalWrite(ACTUATOR_RIGHT_PIN, LOW);
-        digitalWrite(ACTUATOR_LEFT_PIN, LOW);
+        // -------- feed globals for always-running control loop ----------
+        ctrl_rollDeg = Roll;
+        ctrl_gyroY   = gy;
+        ctrl_alt_m   = y;
         
         // Decide on logging rate:
         static unsigned long lastLogTime = 0;
-        // For 5 seconds after apogee, if descent is moderate, use 10Hz logging.
         if ((millis() - apogeeTimestamp < POST_APOGEE_LOG_DURATION) &&
             (fabs(vy) <= DESCENT_VY_FAST_THRESHOLD)) {
           if (millis() - lastLogTime >= LOW_RATE_LOG_INTERVAL) {
@@ -477,16 +480,10 @@ void loop() {
             lastLogTime = millis();
           }
         } else {
-          // Otherwise, log at 1kHz.
           logSensorData();
         }
         
-        // Landing detection: if altitude (y) and relative altitude (relAlt) change by less than LANDING_ALT_CHANGE_THRESHOLD for LANDING_TIME_THRESHOLD ms.
-
-        // Landing detection: if altitude (y) and relative altitude (relAlt) change by less than
-        // LANDING_ALT_CHANGE_THRESHOLD for LANDING_TIME_THRESHOLD ms. Use global variables so the
-        // state persists outside this loop.
-
+        // Landing detection
         if (landingTimerStart == 0) {
           landingTimerStart = millis();
           prevAltitude = y;
@@ -497,8 +494,7 @@ void loop() {
             Summarylog("Landing detected; transitioning to LANDED state.");
             systemState = LANDED;
             stateStartTime = millis();
-            landingDetectTimestamp = millis();  // store uncorrected time
-
+            landingDetectTimestamp = millis();
           }
         } else {
           landingTimerStart = millis();
@@ -529,40 +525,32 @@ void loop() {
         analogWrite(LED_PIN, ledState ? 255 : 0);
       }
       logFilteredData();
-      // Stop logging; flush all buffers and optionally "close" log files
       flushAllBuffers();
       Summarylog("Flight ended. Logging stopped.");
-      // === Flight Summary ===
       Summarylog("========== FLIGHT SUMMARY ==========");
-
-      // Launch time (in micros or millis depending on system)
-      Summarylog("Launch detected at: " + String(launchDetectTimestamp) + " \xC2\xB5s");
-
-      // Entry 2s before launch
+      Summarylog("Launch detected at: " + String(launchDetectTimestamp) + " µs");
       String prelaunchLine = ascentRollingBuffer[ascentEntryTwoSecondsBeforeLaunchIndex].filteredLine;
       Summarylog("Entry 2s before launch: " + prelaunchLine);
-
-      // Apogee time (relative to launch, in seconds to 2dp)
       float apogeeTimeSec = (float)(apogeeTimestamp - launchDetectTimestamp) / 1000.0f;
       Summarylog("Apogee detected at: " + String(apogeeTimeSec, 2) + " s after launch");
-
-      // Landing time corrected for lockout
       unsigned long landingTimeCorrected = landingDetectTimestamp - LANDING_TIME_THRESHOLD;
       Summarylog("Landing detected at: " + String(landingTimeCorrected) + " ms");
-
-      // Max stats
       Summarylog("Max upward velocity (vy): " + String(ascentBufferVyMax, 3) + " m/s");
-      Summarylog("Max upward acceleration (ay): " + String(ascentBufferAyMax, 3) + " m/s\xC2\xB2");
+      Summarylog("Max upward acceleration (ay): " + String(ascentBufferAyMax, 3) + " m/s²");
       Summarylog("Max altitude: " + String(maxAltitudeSummary, 3) + " m");
       Summarylog("====================================");
-
       
-      // Remain here indefinitely. (Consider entering a low-power sleep here.)
-      while (1) {
-        // Idle loop
-      }
+      while (1) { /* idle forever */ }
       break;
     }
+  } // end switch
+
+  // ------------- 2) ALWAYS-ON ROLL CONTROL -------------
+  static unsigned long controlTimer = micros();
+  const unsigned long controlInterval = 1000000UL / operating_feq; // same freq as sensor loops
+  if (micros() - controlTimer >= controlInterval) {
+    controlTimer = micros();
+    runRollControl();
   }
 }
 
