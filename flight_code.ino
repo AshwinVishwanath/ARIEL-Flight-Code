@@ -24,7 +24,7 @@
   ====================================================================*/
 
 // --- GPIO -----------------------------------------------------------
-const int LED_PIN            = 4;
+const int LED_PIN            = 13;
 const int ACTUATOR_LEFT_PIN  = 0;  // anticlockwise servo (CW)
 const int ACTUATOR_RIGHT_PIN = 2;  // clockwise    servo (CCW)
 
@@ -388,9 +388,9 @@ static float fGz    = 0.0f;
 void updateIntegratedAngles(float gx,float gy,float gz,float dt){
   const float a=0.7f;
   fGx=a*gx+(1-a)*fGx; fGy=a*gy+(1-a)*fGy; fGz=a*gz+(1-a)*fGz;
-  iRoll  += fGy*RAD_TO_DEG*RAD_TO_DEG*dt;
-  iPitch += fGx*RAD_TO_DEG*RAD_TO_DEG*dt;
-  iYaw   += fGz*RAD_TO_DEG*RAD_TO_DEG*dt;
+  iRoll  += fGy*RAD_TO_DEG*dt;
+  iPitch += fGx*RAD_TO_DEG*dt;
+  iYaw   += fGz*RAD_TO_DEG*dt;
   if(iRoll<0) iRoll+=360; if(iRoll>=360) iRoll-=360;
   if(iPitch<0)iPitch+=360;if(iPitch>=360)iPitch-=360;
   if(iYaw<0)  iYaw+=360;  if(iYaw>=360)  iYaw-=360;
