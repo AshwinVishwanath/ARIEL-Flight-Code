@@ -28,6 +28,9 @@ const int LED_PIN            = 13;
 const int ACTUATOR_LEFT_PIN  = 0;  // anticlockwise servo (CW)
 const int ACTUATOR_RIGHT_PIN = 2;  // clockwise    servo (CCW)
 
+// 1.000 = no change.  >1 stretches the angles,  <1 shrinks them.
+constexpr float ANGLE_GAIN = 1.000f;
+
 // --- PID roll control ----------------------------------------------
 const float  PID_ACTIVATE_ALT = 0.0f; // start roll control above this alt (m)
 const double PID_KP = 10.0;
@@ -415,48 +418,41 @@ void resetIntegratedAngles() {
   filteredGz = 0.0f;
 }
 
-// Update integration from gyroscope readings (in rad/s) with low-pass filtering
-void updateIntegratedAngles(float gx,float gy,float gz,float dt){
-  // Filter the gyroscope readings using an exponential filter.
-  // Adjust filterAlpha between 0 (heavy filtering) and 1 (no filtering)
-  const float filterAlpha = 0.7f;
-  filteredGx = filterAlpha * gx + (1 - filterAlpha) * filteredGx;
-  filteredGy = filterAlpha * gy + (1 - filterAlpha) * filteredGy;
-  filteredGz = filterAlpha * gz + (1 - filterAlpha) * filteredGz;
+void updateIntegratedAngles(float gx,float gy,float gz,float dt)
+{
+  /* ---------- 1. low-pass filter ---------- */
+  const float a = 0.7f;
+  filteredGx = a * gx + (1 - a) * filteredGx;
+  filteredGy = a * gy + (1 - a) * filteredGy;
+  filteredGz = a * gz + (1 - a) * filteredGz;
 
-  // Integrate the filtered values.
-  // Note: RAD_TO_DEG converts radian/s to degrees/s.
+  /* ---------- 2. apply gain before integration ---------- */
+  const float gxDeg = filteredGx * ANGLE_GAIN * RAD_TO_DEG;
+  const float gyDeg = filteredGy * ANGLE_GAIN * RAD_TO_DEG;
+  const float gzDeg = filteredGz * ANGLE_GAIN * RAD_TO_DEG;
 
-  // RK4 Integration for Roll
-  float k1_roll = filteredGy * RAD_TO_DEG;
-  float k2_roll = (filteredGy) * RAD_TO_DEG;  // constant rate assumption
-  float k3_roll = (filteredGy) * RAD_TO_DEG;
-  float k4_roll = (filteredGy) * RAD_TO_DEG;
-  integratedRoll += (dt / 6.0f) * (k1_roll + 2*k2_roll + 2*k3_roll + k4_roll);
+  /* ---------- 3. RK4 integration ---------- */
+  // Roll
+  float k  = gyDeg;   // constant-rate assumption
+  integratedRoll  += dt * k;
 
-  // RK4 Integration for Pitch
-  float k1_pitch = filteredGx * RAD_TO_DEG;
-  float k2_pitch = (filteredGx) * RAD_TO_DEG;
-  float k3_pitch = (filteredGx) * RAD_TO_DEG;
-  float k4_pitch = (filteredGx) * RAD_TO_DEG;
-  integratedPitch += (dt / 6.0f) * (k1_pitch + 2*k2_pitch + 2*k3_pitch + k4_pitch);
+  // Pitch
+  k = gxDeg;
+  integratedPitch += dt * k;
 
-  // RK4 Integration for Yaw
-  float k1_yaw = filteredGz * RAD_TO_DEG;
-  float k2_yaw = (filteredGz) * RAD_TO_DEG;
-  float k3_yaw = (filteredGz) * RAD_TO_DEG;
-  float k4_yaw = (filteredGz) * RAD_TO_DEG;
-  integratedYaw += (dt / 6.0f) * (k1_yaw + 2*k2_yaw + 2*k3_yaw + k4_yaw);
+  // Yaw
+  k = gzDeg;
+  integratedYaw   += dt * k;
 
-  // Wrap angles to stay between 0 and 360 degrees
-  while(integratedRoll < 0)  integratedRoll += 360.0f;
-  while(integratedRoll >= 360.0f)  integratedRoll -= 360.0f;
+  /* ---------- 4. wrap to 0…360 ---------- */
+  while (integratedRoll  < 0)       integratedRoll  += 360.f;
+  while (integratedRoll  >= 360.f)  integratedRoll  -= 360.f;
 
-  while(integratedPitch < 0) integratedPitch += 360.0f;
-  while(integratedPitch >= 360.0f) integratedPitch -= 360.0f;
+  while (integratedPitch < 0)       integratedPitch += 360.f;
+  while (integratedPitch >= 360.f)  integratedPitch -= 360.f;
 
-  while(integratedYaw < 0) integratedYaw += 360.0f;
-  while(integratedYaw >= 360.0f) integratedYaw -= 360.0f;
+  while (integratedYaw   < 0)       integratedYaw   += 360.f;
+  while (integratedYaw   >= 360.f)  integratedYaw   -= 360.f;
 }
 
 // Function to read the integrated angles
