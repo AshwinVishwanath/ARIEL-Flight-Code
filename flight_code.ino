@@ -1,12 +1,4 @@
-/*********************************************************************
- *  FLIGHT COMPUTER – COMPLETE SKETCH
- *
- *  Board  : Teensy 4.x
- *  Sensors: Adafruit BNO055 + BMP388
- *  Author : you
- *  Notes  : 57 600-baud serial, live $-telemetry, EKF altitude fusion,
- *           PID roll control (200 Hz), SD logging
- *********************************************************************/
+
 
 #include <Arduino.h>
 #include <SPI.h>
