@@ -79,6 +79,7 @@ float manualCalibrateBMP388();
 float getRelativeAltitude();
 void getSensorData(float&, float&, float&, float&, float&, float&, float&, float&, float&);
 void updateIntegratedAngles(float, float, float, float);
+void resetIntegratedAngles();
 void getIntegratedAngles(float&, float&, float&);
 void ekfInit(float, float, float, float, float, float);
 void ekfPredict(float, float, float, float);
@@ -393,23 +394,77 @@ void getSensorData(float &ax,float &ay,float &az,
 }
 
 /*---------------- ORIENTATION (gyro integration) ----------------*/
-static float iRoll  = 0.0f;
-static float iPitch = 0.0f;
-static float iYaw   = 0.0f;
-static float fGx    = 0.0f;
-static float fGy    = 0.0f;
-static float fGz    = 0.0f;
-void updateIntegratedAngles(float gx,float gy,float gz,float dt){
-  const float a=0.7f;
-  fGx=a*gx+(1-a)*fGx; fGy=a*gy+(1-a)*fGy; fGz=a*gz+(1-a)*fGz;
-  iRoll  += fGy*RAD_TO_DEG*dt;
-  iPitch += fGx*RAD_TO_DEG*dt;
-  iYaw   += fGz*RAD_TO_DEG*dt;
-  if(iRoll<0) iRoll+=360; if(iRoll>=360) iRoll-=360;
-  if(iPitch<0)iPitch+=360;if(iPitch>=360)iPitch-=360;
-  if(iYaw<0)  iYaw+=360;  if(iYaw>=360)  iYaw-=360;
+// Static variables to hold the integrated angles (degrees)
+static float integratedRoll  = 0.0f;
+static float integratedPitch = 0.0f;
+static float integratedYaw   = 0.0f;
+
+// Low-pass filter state for gyroscope measurements
+static float filteredGx = 0.0f;
+static float filteredGy = 0.0f;
+static float filteredGz = 0.0f;
+
+// Reset function
+void resetIntegratedAngles() {
+  integratedRoll = 0.0f;
+  integratedPitch = 0.0f;
+  integratedYaw = 0.0f;
+
+  filteredGx = 0.0f;
+  filteredGy = 0.0f;
+  filteredGz = 0.0f;
 }
-void getIntegratedAngles(float &r,float &p,float &y){ r=iRoll; p=iPitch; y=iYaw; }
+
+// Update integration from gyroscope readings (in rad/s) with low-pass filtering
+void updateIntegratedAngles(float gx,float gy,float gz,float dt){
+  // Filter the gyroscope readings using an exponential filter.
+  // Adjust filterAlpha between 0 (heavy filtering) and 1 (no filtering)
+  const float filterAlpha = 0.7f;
+  filteredGx = filterAlpha * gx + (1 - filterAlpha) * filteredGx;
+  filteredGy = filterAlpha * gy + (1 - filterAlpha) * filteredGy;
+  filteredGz = filterAlpha * gz + (1 - filterAlpha) * filteredGz;
+
+  // Integrate the filtered values.
+  // Note: RAD_TO_DEG converts radian/s to degrees/s.
+
+  // RK4 Integration for Roll
+  float k1_roll = filteredGy * RAD_TO_DEG * RAD_TO_DEG;
+  float k2_roll = (filteredGy) * RAD_TO_DEG * RAD_TO_DEG;  // constant rate assumption
+  float k3_roll = (filteredGy) * RAD_TO_DEG * RAD_TO_DEG;
+  float k4_roll = (filteredGy) * RAD_TO_DEG * RAD_TO_DEG;
+  integratedRoll += (dt / 6.0f) * (k1_roll + 2*k2_roll + 2*k3_roll + k4_roll);
+
+  // RK4 Integration for Pitch
+  float k1_pitch = filteredGx * RAD_TO_DEG * RAD_TO_DEG;
+  float k2_pitch = (filteredGx) * RAD_TO_DEG * RAD_TO_DEG;
+  float k3_pitch = (filteredGx) * RAD_TO_DEG * RAD_TO_DEG;
+  float k4_pitch = (filteredGx) * RAD_TO_DEG * RAD_TO_DEG;
+  integratedPitch += (dt / 6.0f) * (k1_pitch + 2*k2_pitch + 2*k3_pitch + k4_pitch);
+
+  // RK4 Integration for Yaw
+  float k1_yaw = filteredGz * RAD_TO_DEG * RAD_TO_DEG;
+  float k2_yaw = (filteredGz) * RAD_TO_DEG * RAD_TO_DEG;
+  float k3_yaw = (filteredGz) * RAD_TO_DEG * RAD_TO_DEG;
+  float k4_yaw = (filteredGz) * RAD_TO_DEG * RAD_TO_DEG;
+  integratedYaw += (dt / 6.0f) * (k1_yaw + 2*k2_yaw + 2*k3_yaw + k4_yaw);
+
+  // Wrap angles to stay between 0 and 360 degrees
+  while(integratedRoll < 0)  integratedRoll += 360.0f;
+  while(integratedRoll >= 360.0f)  integratedRoll -= 360.0f;
+
+  while(integratedPitch < 0) integratedPitch += 360.0f;
+  while(integratedPitch >= 360.0f) integratedPitch -= 360.0f;
+
+  while(integratedYaw < 0) integratedYaw += 360.0f;
+  while(integratedYaw >= 360.0f) integratedYaw -= 360.0f;
+}
+
+// Function to read the integrated angles
+void getIntegratedAngles(float &r,float &p,float &y){
+  r = integratedRoll;
+  p = integratedPitch;
+  y = integratedYaw;
+}
 
 /*------------------------------------------------------------------
    (single, unique) EKF implementation begins right here …
