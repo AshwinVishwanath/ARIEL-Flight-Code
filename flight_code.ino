@@ -410,42 +410,59 @@ void resetIntegratedAngles() {
   filteredGz = 0.0f;
 }
 
-void updateIntegratedAngles(float gx,float gy,float gz,float dt)
+/* ------------------------------------------------------------------
+ *  updateIntegratedAngles()
+ *      integratorMode == 0  →  LPF + ANGLE_GAIN + RK4  (original)
+ *      integratorMode == 1  →  simple Euler integration
+ * -----------------------------------------------------------------*/
+void updateIntegratedAngles(float gx, float gy, float gz, float dt)
 {
-  /* ---------- 1. low-pass filter ---------- */
-  const float a = 0.7f;
-  filteredGx = a * gx + (1 - a) * filteredGx;
-  filteredGy = a * gy + (1 - a) * filteredGy;
-  filteredGz = a * gz + (1 - a) * filteredGz;
+  /* ---------- selectable mode flag ---------- */
+  static uint8_t integratorMode = 1;          // 0 = FULL, 1 = SIMPLE
+  //  ▸ set integratorMode = 1 somewhere in setup() or over Serial
+  //    to switch to the lightweight path for testing.
 
-  /* ---------- 2. apply gain before integration ---------- */
-  const float gxDeg = filteredGx * ANGLE_GAIN * RAD_TO_DEG;
-  const float gyDeg = filteredGy * ANGLE_GAIN * RAD_TO_DEG;
-  const float gzDeg = filteredGz * ANGLE_GAIN * RAD_TO_DEG;
+  /* ---------- shared state ---------- */
+  static float filteredGx = 0.0f;
+  static float filteredGy = 0.0f;
+  static float filteredGz = 0.0f;
 
-  /* ---------- 3. RK4 integration ---------- */
-  // Roll
-  float k  = gyDeg;   // constant-rate assumption
-  integratedRoll  += dt * k;
+  if (integratorMode == 0) {                   /* ==== FULL path ==== */
 
-  // Pitch
-  k = gxDeg;
-  integratedPitch += dt * k;
+    /* 1. 1st-order low-pass filter */
+    const float a = 0.7f;
+    filteredGx = a * gx + (1 - a) * filteredGx;
+    filteredGy = a * gy + (1 - a) * filteredGy;
+    filteredGz = a * gz + (1 - a) * filteredGz;
 
-  // Yaw
-  k = gzDeg;
-  integratedYaw   += dt * k;
+    /* 2. apply gain + convert to deg/s */
+    const float gxDeg = filteredGx * ANGLE_GAIN * RAD_TO_DEG;
+    const float gyDeg = filteredGy * ANGLE_GAIN * RAD_TO_DEG;
+    const float gzDeg = filteredGz * ANGLE_GAIN * RAD_TO_DEG;
 
-  /* ---------- 4. wrap to 0…360 ---------- */
-  while (integratedRoll  < 0)       integratedRoll  += 360.f;
-  while (integratedRoll  >= 360.f)  integratedRoll  -= 360.f;
+    /* 3. RK4 (but constant-rate → Euler is equivalent) */
+    integratedRoll  += dt * gyDeg;   // Y-rate → Roll
+    integratedPitch += dt * gxDeg;   // X-rate → Pitch
+    integratedYaw   += dt * gzDeg;   // Z-rate → Yaw
+  }
+  else {                                         /* ==== SIMPLE path ==== */
+    /* integrate raw rad/s directly, then gain + convert */
+    integratedRoll  += gy * ANGLE_GAIN * dt * RAD_TO_DEG;
+    integratedPitch += gx * ANGLE_GAIN * dt * RAD_TO_DEG;
+    integratedYaw   += gz * ANGLE_GAIN * dt * RAD_TO_DEG;
+  }
 
-  while (integratedPitch < 0)       integratedPitch += 360.f;
-  while (integratedPitch >= 360.f)  integratedPitch -= 360.f;
+  /* ---------- wrap to 0…360° (common) ---------- */
+  if (integratedRoll  < 0)       integratedRoll  += 360.f;
+  else if (integratedRoll  >= 360.f) integratedRoll  -= 360.f;
 
-  while (integratedYaw   < 0)       integratedYaw   += 360.f;
-  while (integratedYaw   >= 360.f)  integratedYaw   -= 360.f;
+  if (integratedPitch < 0)       integratedPitch += 360.f;
+  else if (integratedPitch >= 360.f) integratedPitch -= 360.f;
+
+  if (integratedYaw   < 0)       integratedYaw   += 360.f;
+  else if (integratedYaw   >= 360.f) integratedYaw   -= 360.f;
 }
+
 
 // Function to read the integrated angles
 void getIntegratedAngles(float &r,float &p,float &y){
