@@ -29,7 +29,7 @@ const int ACTUATOR_LEFT_PIN  = 0;  // anticlockwise servo (CW)
 const int ACTUATOR_RIGHT_PIN = 2;  // clockwise    servo (CCW)
 
 // --- PID roll control ----------------------------------------------
-const float  PID_ACTIVATE_ALT = 50.0f; // start roll control above this alt (m)
+const float  PID_ACTIVATE_ALT = 0.0f; // start roll control above this alt (m)
 const double PID_KP = 10.0;
 const double PID_KI = 5.0;
 const double PID_KD = 3.0;
@@ -428,24 +428,24 @@ void updateIntegratedAngles(float gx,float gy,float gz,float dt){
   // Note: RAD_TO_DEG converts radian/s to degrees/s.
 
   // RK4 Integration for Roll
-  float k1_roll = filteredGy * RAD_TO_DEG * RAD_TO_DEG;
-  float k2_roll = (filteredGy) * RAD_TO_DEG * RAD_TO_DEG;  // constant rate assumption
-  float k3_roll = (filteredGy) * RAD_TO_DEG * RAD_TO_DEG;
-  float k4_roll = (filteredGy) * RAD_TO_DEG * RAD_TO_DEG;
+  float k1_roll = filteredGy * RAD_TO_DEG;
+  float k2_roll = (filteredGy) * RAD_TO_DEG;  // constant rate assumption
+  float k3_roll = (filteredGy) * RAD_TO_DEG;
+  float k4_roll = (filteredGy) * RAD_TO_DEG;
   integratedRoll += (dt / 6.0f) * (k1_roll + 2*k2_roll + 2*k3_roll + k4_roll);
 
   // RK4 Integration for Pitch
-  float k1_pitch = filteredGx * RAD_TO_DEG * RAD_TO_DEG;
-  float k2_pitch = (filteredGx) * RAD_TO_DEG * RAD_TO_DEG;
-  float k3_pitch = (filteredGx) * RAD_TO_DEG * RAD_TO_DEG;
-  float k4_pitch = (filteredGx) * RAD_TO_DEG * RAD_TO_DEG;
+  float k1_pitch = filteredGx * RAD_TO_DEG;
+  float k2_pitch = (filteredGx) * RAD_TO_DEG;
+  float k3_pitch = (filteredGx) * RAD_TO_DEG;
+  float k4_pitch = (filteredGx) * RAD_TO_DEG;
   integratedPitch += (dt / 6.0f) * (k1_pitch + 2*k2_pitch + 2*k3_pitch + k4_pitch);
 
   // RK4 Integration for Yaw
-  float k1_yaw = filteredGz * RAD_TO_DEG * RAD_TO_DEG;
-  float k2_yaw = (filteredGz) * RAD_TO_DEG * RAD_TO_DEG;
-  float k3_yaw = (filteredGz) * RAD_TO_DEG * RAD_TO_DEG;
-  float k4_yaw = (filteredGz) * RAD_TO_DEG * RAD_TO_DEG;
+  float k1_yaw = filteredGz * RAD_TO_DEG;
+  float k2_yaw = (filteredGz) * RAD_TO_DEG;
+  float k3_yaw = (filteredGz) * RAD_TO_DEG;
+  float k4_yaw = (filteredGz) * RAD_TO_DEG;
   integratedYaw += (dt / 6.0f) * (k1_yaw + 2*k2_yaw + 2*k3_yaw + k4_yaw);
 
   // Wrap angles to stay between 0 and 360 degrees
